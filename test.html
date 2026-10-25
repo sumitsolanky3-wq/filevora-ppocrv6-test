@@ -1,57 +1,116 @@
+
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Filevora PP-OCRv6 Test</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Filevora Structured OCR Test</title>
 <style>
 :root{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#182033;background:#f5f7fb}
-*{box-sizing:border-box}body{margin:0;padding:18px}.wrap{max-width:900px;margin:auto}
+*{box-sizing:border-box}
+body{margin:0;padding:18px}
+.wrap{max-width:900px;margin:auto}
 header,.panel{background:white;border:1px solid #e2e7f0;border-radius:18px;padding:20px;margin-bottom:14px}
-h1{font-size:24px;margin:0 0 7px}p{line-height:1.5;color:#586174}
+h1{font-size:24px;margin:0 0 7px}
+p{line-height:1.5;color:#586174}
 label{font-weight:650;display:block;margin:14px 0 7px}
 input[type=url],input[type=file]{width:100%;padding:12px;border:1px solid #cfd6e4;border-radius:10px;background:#fff}
 button{background:#4d4ae8;color:#fff;border:0;border-radius:11px;padding:13px 16px;font-weight:750;margin-top:14px;width:100%;font-size:15px}
-button:disabled{opacity:.55}#status{padding:12px;border-radius:10px;background:#eef1ff;margin:12px 0;white-space:pre-wrap}
+button:disabled{opacity:.55}
+#status{padding:12px;border-radius:10px;background:#eef1ff;margin:12px 0;white-space:pre-wrap}
 pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#101828;color:#eef2ff;padding:14px;border-radius:12px;max-height:600px;overflow:auto;font-size:12px}
-.small{font-size:13px}.warn{background:#fff5d9;padding:12px;border-radius:10px;color:#6d4a00}
-</style></head>
-<body><main class="wrap">
+.small{font-size:13px}
+.warn{background:#fff5d9;padding:12px;border-radius:10px;color:#6d4a00}
+</style>
+</head>
+<body>
+<main class="wrap">
 <header>
-<h1>Filevora · PP-OCRv6 Test</h1>
+<h1>Filevora · Structured OCR Test</h1>
 <p>Separate test page — does not modify the live Filevora website.</p>
-<div class="warn">Experimental model test. Never accept file limits or dimensions automatically unless they match the source notification.</div>
+<div class="warn">Experimental OCR candidates only. Verify every size, dimension, and format against the original official notification before using it in Form Ready.</div>
 </header>
+
 <section class="panel">
 <label for="url">Python backend URL</label>
-<input id="url" type="url" placeholder="https://your-separate-test-service.example.com">
-<label for="file">Recruitment notification screenshot or PDF</label>
+<input id="url" type="url" value="https://filevora-ppocrv6-test.onrender.com" placeholder="https://your-separate-test-service.example.com">
+
+<label for="file">Original recruitment notification screenshot or PDF</label>
 <input id="file" type="file" accept="image/*,.pdf">
-<button id="run">Run layout + OCR test</button>
-<div id="status">Enter your backend URL, choose a source screenshot/PDF, then run the test.</div>
-<p class="small">First run may be slow while model files are downloaded and loaded.</p>
+
+<button id="run">Run OCR + extract requirements</button>
+<div id="status">Backend URL is filled in. Choose the original notification screenshot/PDF, then run the test.</div>
+<p class="small">First run may be slow while the free backend wakes up.</p>
 </section>
-<section class="panel"><h2>Recognized table / text</h2><pre id="text">No result yet.</pre></section>
-<section class="panel"><h2>Raw model artifacts</h2><pre id="raw">No result yet.</pre></section>
+
+<section class="panel">
+<h2>Structured requirement candidates</h2>
+<pre id="requirements">No result yet.</pre>
+</section>
+
+<section class="panel">
+<h2>Recognized text</h2>
+<pre id="text">No result yet.</pre>
+</section>
+
+<section class="panel">
+<h2>Raw page artifacts</h2>
+<pre id="raw">No result yet.</pre>
+</section>
 </main>
+
 <script>
 const $=id=>document.getElementById(id);
+
 $('run').addEventListener('click',async()=>{
  const base=$('url').value.trim().replace(/\/+$/,'');
  const f=$('file').files[0];
- if(!base){$('status').textContent='Please enter the deployed Python backend URL.';return}
- if(!f){$('status').textContent='Please choose the original notification screenshot or PDF.';return}
- $('run').disabled=true;$('text').textContent='';$('raw').textContent='';
+
+ if(!base){
+  $('status').textContent='Please enter the deployed Python backend URL.';
+  return;
+ }
+ if(!f){
+  $('status').textContent='Please choose the original notification screenshot or PDF.';
+  return;
+ }
+
+ $('run').disabled=true;
+ $('text').textContent='';
+ $('raw').textContent='';
+ $('requirements').textContent='';
+
  try{
   $('status').textContent='Checking backend…';
-  const h=await fetch(base+'/health');if(!h.ok)throw Error('Health check failed: HTTP '+h.status);
-  $('status').textContent='Uploading file and running the model. First run can take several minutes…';
-  const fd=new FormData();fd.append('file',f,f.name);
+  const h=await fetch(base+'/health');
+  if(!h.ok)throw Error('Health check failed: HTTP '+h.status);
+
+  $('status').textContent='Uploading file and extracting OCR text…';
+  const fd=new FormData();
+  fd.append('file',f,f.name);
+
   const r=await fetch(base+'/ocr',{method:'POST',body:fd});
-  const d=await r.json();if(!r.ok)throw Error(d.detail||('HTTP '+r.status));
-  $('status').textContent='Completed. Requested mode: '+d.requested_mode+' · Engine: '+d.engine+'\n'+(d.warning||'');
-  $('text').textContent=d.text||'(No Markdown text returned; inspect raw artifacts.)';
-  $('raw').textContent=JSON.stringify(d.artifacts||d,null,2);
- }catch(e){$('status').textContent='Test failed: '+e.message+'\nCheck the backend logs and deployment settings.'}
- finally{$('run').disabled=false}
+  const d=await r.json();
+
+  if(!r.ok)throw Error(d.detail||('HTTP '+r.status));
+
+  $('status').textContent='Completed. Engine: '+(d.engine||'unknown')+'\n'+(d.warning||'');
+
+  $('requirements').textContent=JSON.stringify(
+   d.extracted_requirements||{
+    note:'This backend response has no structured extraction field yet.'
+   },null,2
+  );
+
+  $('text').textContent=d.text||'(No readable text returned.)';
+  $('raw').textContent=JSON.stringify(d.artifacts||[],null,2);
+
+ }catch(e){
+  $('status').textContent='Test failed: '+e.message+'\nCheck the backend deployment and logs.';
+ }finally{
+  $('run').disabled=false;
+ }
 });
-</script></body></html>
+</script>
+</body>
+</html>
