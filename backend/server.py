@@ -10,7 +10,7 @@ import io
 import re
 import traceback
 
-app = FastAPI(title="Filevora OCR Requirement Test", version="0.6.0")
+app = FastAPI(title="Filevora OCR Requirement Test", version="0.7.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -25,18 +25,30 @@ MAX_PDF_PAGES = 3
 MAX_IMAGE_SIDE = 2600
 
 LABEL_PATTERNS = [
-    ("photograph", re.compile(r"\b(?:photograph|passport\s*photo|photo\s*graph)\b", re.I)),
+    ("photograph", re.compile(
+        r"\b(?:photograph|passport\s*photo|photo\s*graph)\b", re.I)),
     ("signature", re.compile(r"\bsignature\b", re.I)),
-    ("marksheets", re.compile(r"\b(?:10th|12th|matriculation|marksheets?|mark\s*sheets?|degree\s*(?:and|&)\s*marksheets?|graduation|post\s*graduation)\b", re.I)),
-    ("identity_document", re.compile(r"\b(?:aadhaar|aadhar|photo\s*id|identity\s*card)\b", re.I)),
-    ("application_form", re.compile(r"\b(?:signed\s*application\s*form|application\s*form)\b", re.I)),
-    ("category_certificate", re.compile(r"\b(?:category\s*certificate|sc\s*/?\s*st|obc|bc-?\s*[ab]|ews|non-?creamy(?:\s*layer)?|domicile|haryana\s*resident|residence\s*certificate|dsc\s*/\s*osc)\b", re.I)),
-    ("noc_experience", re.compile(r"\b(?:noc|experience\s*(?:proof|certificate))\b", re.I)),
+    ("marksheets", re.compile(
+        r"\b(?:10th|12th|matriculation|marksheets?|mark\s*sheets?|"
+        r"degree\s*(?:and|&)\s*marksheets?|graduation|post\s*graduation)\b",
+        re.I)),
+    ("identity_document", re.compile(
+        r"\b(?:aadhaar|aadhar|photo\s*id|identity\s*card)\b", re.I)),
+    ("application_form", re.compile(
+        r"\b(?:signed\s*application\s*form|application\s*form)\b", re.I)),
+    ("category_certificate", re.compile(
+        r"\b(?:category\s*certificate|sc\s*/?\s*st|obc|bc-?\s*[ab]|"
+        r"ews|non-?creamy(?:\s*layer)?|domicile|haryana\s*resident|"
+        r"residence\s*certificate|dsc\s*/\s*osc)\b", re.I)),
+    ("noc_experience", re.compile(
+        r"\b(?:noc|experience\s*(?:proof|certificate))\b", re.I)),
 ]
 
 GENERIC_CERT_RE = re.compile(r"\bcertificates?\b", re.I)
-DIMENSION_RE = re.compile(r"(?<!\d)(\d{2,4})\s*(?:x|×)\s*(\d{2,4})\s*(?:px|pixels?)\b", re.I)
-SIZE_RE = re.compile(r"\b(?:up\s*to|max(?:imum)?\s*)?(\d+(?:\.\d+)?)\s*(KB|MB)\b", re.I)
+DIMENSION_RE = re.compile(
+    r"(?<!\d)(\d{2,4})\s*(?:x|×)\s*(\d{2,4})\s*(?:px|pixels?)\b", re.I)
+SIZE_RE = re.compile(
+    r"\b(?:up\s*to|max(?:imum)?\s*)?(\d+(?:\.\d+)?)\s*(KB|MB)\b", re.I)
 FORMAT_RE = re.compile(r"\b(JPEG|JPG|PNG|PDF)\b", re.I)
 
 
@@ -64,7 +76,23 @@ def find_labels(text: str):
             item["start"] <= match.start() < item["end"]
             for item in found
         )
-        if not covered:
+
+        nearby = text[
+            max(0, match.start() - 90):
+            min(len(text), match.end() + 90)
+        ]
+
+        specific_nearby = any(re.search(pattern, nearby, re.I) for pattern in [
+            r"category\s*certificate",
+            r"signed\s*application",
+            r"marksheets?",
+            r"degree",
+            r"domicile",
+            r"ews",
+            r"non-?creamy"
+        ])
+
+        if not covered and not specific_nearby:
             found.append({
                 "kind": "certificate",
                 "start": match.start(),
@@ -74,15 +102,15 @@ def find_labels(text: str):
 
     found.sort(key=lambda item: item["start"])
 
-    deduped = []
+    result = []
     for item in found:
-        if deduped and item["kind"] == deduped[-1]["kind"]:
-            between = text[deduped[-1]["end"]:item["start"]]
+        if result and item["kind"] == result[-1]["kind"]:
+            between = text[result[-1]["end"]:item["start"]]
             if len(between) < 45:
                 continue
-        deduped.append(item)
+        result.append(item)
 
-    return deduped
+    return result
 
 
 def unique_keep_order(items, key):
@@ -90,9 +118,9 @@ def unique_keep_order(items, key):
     result = []
 
     for item in items:
-        item_key = key(item)
-        if item_key not in seen:
-            seen.add(item_key)
+        value = key(item)
+        if value not in seen:
+            seen.add(value)
             result.append(item)
 
     return result
@@ -103,11 +131,11 @@ def extract_requirements(text: str):
     labels = find_labels(text)
     candidates = []
 
-    for i, item in enumerate(labels):
+    for index, item in enumerate(labels):
         start = item["start"]
         next_start = (
-            labels[i + 1]["start"]
-            if i + 1 < len(labels)
+            labels[index + 1]["start"]
+            if index + 1 < len(labels)
             else len(text)
         )
 
@@ -120,9 +148,10 @@ def extract_requirements(text: str):
             }
             for match in DIMENSION_RE.finditer(snippet)
         ]
+
         dimensions = unique_keep_order(
             dimensions,
-            lambda d: (d["width_px"], d["height_px"])
+            lambda value: (value["width_px"], value["height_px"])
         )
 
         sizes = []
@@ -143,7 +172,7 @@ def extract_requirements(text: str):
 
         sizes = unique_keep_order(
             sizes,
-            lambda s: (s["value"], s["unit"])
+            lambda value: (value["value"], value["unit"])
         )
 
         formats = unique_keep_order(
@@ -155,7 +184,7 @@ def extract_requirements(text: str):
         )
 
         candidate = {
-            "id": f"{item['kind']}-{i + 1}",
+            "id": f"{item['kind']}-{index + 1}",
             "document_type": item["kind"],
             "label_found": item["label"],
             "dimensions": dimensions[:2],
@@ -183,31 +212,58 @@ def extract_requirements(text: str):
 
         candidates.append(candidate)
 
-    # Remove duplicate candidates with the same type and values.
+    # Merge exact duplicate OCR candidates.
     merged = []
-    seen = set()
+    by_key = {}
 
     for candidate in candidates:
         key = (
             candidate["document_type"],
             tuple(
-                (d["width_px"], d["height_px"])
-                for d in candidate["dimensions"]
+                (dimension["width_px"], dimension["height_px"])
+                for dimension in candidate["dimensions"]
             ),
             tuple(candidate["allowed_formats_found"]),
             tuple(
-                (s["value"], s["unit"])
-                for s in candidate["file_size_limits_found"]
+                (size["value"], size["unit"])
+                for size in candidate["file_size_limits_found"]
             )
         )
 
-        if key in seen:
-            continue
+        if key not in by_key:
+            by_key[key] = len(merged)
+            merged.append(candidate)
+        else:
+            old_index = by_key[key]
+            old = merged[old_index]
 
-        seen.add(key)
-        merged.append(candidate)
+            old_score = (
+                len(old["dimensions"])
+                + len(old["allowed_formats_found"])
+                + len(old["file_size_limits_found"])
+            )
 
-    browser_noise = bool(re.search(
+            new_score = (
+                len(candidate["dimensions"])
+                + len(candidate["allowed_formats_found"])
+                + len(candidate["file_size_limits_found"])
+            )
+
+            if new_score > old_score:
+                merged[old_index] = candidate
+
+    # Remove empty generic certificate cards caused by table headings.
+    merged = [
+        candidate for candidate in merged
+        if not (
+            candidate["document_type"] == "certificate"
+            and not candidate["dimensions"]
+            and not candidate["allowed_formats_found"]
+            and not candidate["file_size_limits_found"]
+        )
+    ]
+
+    noise = bool(re.search(
         r"\b(?:google\.com/search|shopping|videos news forums|"
         r"AI overview|KB/S|sign in|settings)\b",
         text,
@@ -215,9 +271,9 @@ def extract_requirements(text: str):
     ))
 
     return {
-        "schema_version": "0.4",
+        "schema_version": "0.5",
         "status": "candidates_only",
-        "browser_or_page_noise_detected": browser_noise,
+        "browser_or_page_noise_detected": noise,
         "candidate_count": len(merged),
         "note": (
             "OCR-derived candidates only. Verify all values "
@@ -252,7 +308,7 @@ def health():
         "requested_mode": "tesseract-lightweight",
         "model_loaded": True,
         "load_error": None,
-        "version": "0.6.0"
+        "version": "0.7.0"
     }
 
 
@@ -278,7 +334,10 @@ async def ocr(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="File is empty.")
 
     if len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail="Upload limit is 15 MB.")
+        raise HTTPException(
+            status_code=413,
+            detail="Upload limit is 15 MB."
+        )
 
     try:
         pages = []
@@ -341,8 +400,9 @@ async def ocr(file: UploadFile = File(...)):
             "requested_mode": "tesseract-lightweight",
             "engine": "Tesseract OCR (lightweight)",
             "ocr_model": "Tesseract English",
-            "text": full_text or (
-                "No readable text detected. Try a clearer, straight image."
+            "text": (
+                full_text
+                or "No readable text detected. Try a clearer, straight image."
             ),
             "artifacts": pages,
             "extracted_requirements": extract_requirements(full_text),
