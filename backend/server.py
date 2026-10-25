@@ -1,4 +1,5 @@
 
+
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -12,7 +13,7 @@ import traceback
 
 app = FastAPI(
     title="Filevora lightweight OCR + requirements extraction",
-    version="0.4.0"
+    version="0.5.0"
 )
 
 app.add_middleware(
@@ -25,86 +26,95 @@ app.add_middleware(
 
 MAX_UPLOAD_BYTES = 15 * 1024 * 1024
 MAX_PDF_PAGES = 3
-MAX_IMAGE_SIDE = 2200
+MAX_IMAGE_SIDE = 2600
 
-SECTION_PATTERNS = [
+LABEL_PATTERNS = [
     ("photograph", re.compile(
-        r"\b(?:photograph|photo\s*graph|passport\s*photo)\b", re.I)),
-    ("signature", re.compile(r"\b(?:signature|sign)\b", re.I)),
+        r"\b(?:photograph|passport\s*photo|photo\s*graph)\b", re.I)),
+    ("signature", re.compile(r"\b(?:signature)\b", re.I)),
     ("marksheets", re.compile(
-        r"\b(?:10th|12th|marksheets?|mark\s*sheets?|degree\s*certificates?)\b", re.I)),
+        r"\b(?:(?:10th|12th)\s*(?:&|and)?\s*)?marksheets?|"
+        r"mark\s*sheets?|degrees?\s*(?:and|&)\s*mark\s*sheets?|"
+        r"graduation|post\s*graduation\b", re.I)),
     ("identity_document", re.compile(
         r"\b(?:aadhaar|aadhar|photo\s*id|identity\s*card)\b", re.I)),
     ("application_form", re.compile(
         r"\b(?:signed\s*application\s*form|application\s*form)\b", re.I)),
     ("category_certificate", re.compile(
-        r"\b(?:category\s*certificate|sc\s*/?\s*st|obc|bc-?[ab]|ews|non-?creamy|domicile|residen(?:t|ce)\s*certificate)\b", re.I)),
-    ("certificate", re.compile(r"\b(?:certificate|certificates)\b", re.I)),
+        r"\b(?:category\s*certificate|sc\s*/?\s*st|obc|bc-?\s*[ab]|"
+        r"ews|non-?creamy(?:\s*layer)?|domicile|haryana\s*resident|"
+        r"residence\s*certificate|dsc\s*/\s*osc)\b", re.I)),
+    ("noc_experience", re.compile(
+        r"\b(?:noc|experience\s*proof|experience\s*certificate)\b", re.I)),
 ]
 
+GENERIC_CERT_RE = re.compile(r"\bcertificates?\b", re.I)
 DIMENSION_RE = re.compile(
-    r"(?<!\d)(\d{2,4})\s*(?:x|×)\s*(\d{2,4})\s*(?:px|pixels?)\b",
-    re.I
-)
+    r"(?<!\d)(\d{2,4})\s*(?:x|×)\s*(\d{2,4})\s*(?:px|pixels?)\b", re.I)
 SIZE_RE = re.compile(
-    r"\b(?:up\s*to|max(?:imum)?\s*)?(\d+(?:\.\d+)?)\s*(KB|MB)\b",
-    re.I
-)
+    r"\b(?:up\s*to|max(?:imum)?\s*)?(\d+(?:\.\d+)?)\s*(KB|MB)\b", re.I)
 FORMAT_RE = re.compile(r"\b(JPEG|JPG|PNG|PDF)\b", re.I)
 
 
-def _clean_ocr_text(text: str) -> str:
-    text = text.replace("\x0c", "\n")
+def normalize_text(text: str) -> str:
+    text = text.replace("\x0c", "\n").replace("\r", "\n")
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
 
-def _label_occurrences(text: str):
-    found = []
+def find_labels(text: str):
+    matches = []
 
-    for kind, pattern in SECTION_PATTERNS:
+    for kind, pattern in LABEL_PATTERNS:
         for match in pattern.finditer(text):
-            if kind == "certificate" and any(
-                other_kind == "category_certificate"
-                and other_match.start() <= match.start() < other_match.end()
-                for other_kind, other_match in found
-            ):
-                continue
+            matches.append((
+                kind, match.start(), match.end(), match.group(0)
+            ))
 
-            found.append((kind, match))
+    # Generic certificate matches are added only if not already covered
+    # by a specific document label.
+    for match in GENERIC_CERT_RE.finditer(text):
+        covered = any(
+            start <= match.start() < end
+            for _, start, end, _ in matches
+        )
+        if not covered:
+            matches.append((
+                "certificate", match.start(),
+                match.end(), match.group(0)
+            ))
 
-    found.sort(key=lambda item: item[1].start())
+    matches.sort(key=lambda item: item[1])
 
     deduped = []
-    for kind, match in found:
+    for item in matches:
+        kind, start, end, label = item
+
         if deduped and kind == deduped[-1][0]:
-            gap = text[deduped[-1][1].end():match.start()]
-            if len(gap) < 45:
+            if start - deduped[-1][2] < 35:
                 continue
 
-        deduped.append((kind, match))
+        deduped.append(item)
 
     return deduped
 
 
 def extract_requirements(text: str):
-    """Create OCR-derived candidates, not verified official requirements."""
-    text = _clean_ocr_text(text)
-    labels = _label_occurrences(text)
+    text = normalize_text(text)
+    labels = find_labels(text)
     candidates = []
     seen = set()
 
-    for index, (kind, match) in enumerate(labels):
+    for i, (kind, start, label_end, label) in enumerate(labels):
+        # Stop at the next document heading or after a short window.
         next_start = (
-            labels[index + 1][1].start()
-            if index + 1 < len(labels)
+            labels[i + 1][1]
+            if i + 1 < len(labels)
             else len(text)
         )
-
-        # Limit each candidate to its local section.
-        end = min(next_start, match.end() + 240)
-        snippet = text[match.start():end].strip()
+        end = min(next_start, start + 300)
+        snippet = text[start:end].strip()
 
         dimensions = [
             {
@@ -119,7 +129,7 @@ def extract_requirements(text: str):
             value = float(m.group(1))
             unit = m.group(2).upper()
 
-            size_kb = (
+            kb = (
                 int(round(value * 1024))
                 if unit == "MB"
                 else int(round(value))
@@ -128,7 +138,7 @@ def extract_requirements(text: str):
             sizes.append({
                 "value": value,
                 "unit": unit,
-                "max_size_kb_approx": size_kb
+                "max_size_kb_approx": kb
             })
 
         formats = list(dict.fromkeys(
@@ -136,17 +146,35 @@ def extract_requirements(text: str):
             for m in FORMAT_RE.finditer(snippet)
         ))
 
+        # Remove duplicate values while keeping their original order.
+        unique_dimensions = []
+        dimension_keys = set()
+        for item in dimensions:
+            key = (item["width_px"], item["height_px"])
+            if key not in dimension_keys:
+                dimension_keys.add(key)
+                unique_dimensions.append(item)
+
+        unique_sizes = []
+        size_keys = set()
+        for item in sizes:
+            key = (item["value"], item["unit"])
+            if key not in size_keys:
+                size_keys.add(key)
+                unique_sizes.append(item)
+
         candidate = {
             "document_type": kind,
-            "dimensions": dimensions[:1],
+            "label_found": label,
+            "dimensions": unique_dimensions[:2],
             "allowed_formats_found": formats[:3],
-            "file_size_limits_found": sizes[:2],
-            "source_snippet": snippet[:300],
+            "file_size_limits_found": unique_sizes[:3],
+            "source_snippet": snippet[:350],
             "status": "needs_review",
             "verified": False,
             "review_note": (
-                "Verify this candidate against the original official "
-                "notification. OCR may miss or misread values."
+                "OCR-derived candidate. Verify against the original "
+                "official notification before using."
             )
         }
 
@@ -158,10 +186,9 @@ def extract_requirements(text: str):
             ),
             tuple(candidate["allowed_formats_found"]),
             tuple(
-                (z["value"], z["unit"])
-                for z in candidate["file_size_limits_found"]
-            ),
-            re.sub(r"\W+", "", snippet.lower())[:80]
+                (s["value"], s["unit"])
+                for s in candidate["file_size_limits_found"]
+            )
         )
 
         if fingerprint not in seen:
@@ -169,19 +196,36 @@ def extract_requirements(text: str):
             candidates.append(candidate)
 
     browser_noise = bool(re.search(
-        r"\b(?:google\.com/search|shopping|videos news forums|AI overview|KB/S)\b",
-        text,
-        re.I
+        r"\b(?:google\.com/search|shopping|videos news forums|"
+        r"AI overview|KB/S|sign in|settings)\b",
+        text, re.I
     ))
 
+    for item in candidates:
+        if (
+            not item["dimensions"]
+            and item["document_type"] in ("photograph", "signature")
+        ):
+            item["review_note"] = (
+                "No pixel dimensions found near this label; "
+                "check the original table."
+            )
+
+        if len(item["file_size_limits_found"]) > 1:
+            item["review_note"] += (
+                " Multiple size values found nearby; verify which "
+                "limit belongs to this document."
+            )
+
     return {
-        "schema_version": "0.2",
+        "schema_version": "0.3",
         "status": "candidates_only",
         "browser_or_page_noise_detected": browser_noise,
+        "candidate_count": len(candidates),
         "note": (
-            "Conservative OCR-assisted extraction, not AI verification. "
-            "If browser/page noise is detected, upload a close crop of "
-            "the official requirements table. Verify every value before use."
+            "OCR extraction only, not official verification. For best "
+            "results upload a clear crop of the actual requirements table. "
+            "Check every candidate against the official notification."
         ),
         "requirements": candidates
     }
@@ -201,7 +245,7 @@ def ocr_image(image: Image.Image) -> str:
     return pytesseract.image_to_string(
         image,
         lang="eng",
-        config="--oem 1 --psm 3"
+        config="--oem 1 --psm 6"
     ).strip()
 
 
@@ -212,14 +256,15 @@ def health():
         "service": "Filevora lightweight OCR test",
         "requested_mode": "tesseract-lightweight",
         "model_loaded": True,
-        "load_error": None
+        "load_error": None,
+        "version": "0.5.0"
     }
 
 
 @app.post("/ocr")
 async def ocr(file: UploadFile = File(...)):
-    name = Path(file.filename or "upload.bin").name
-    suffix = Path(name).suffix.lower()
+    filename = Path(file.filename or "upload.bin").name
+    suffix = Path(filename).suffix.lower()
 
     allowed = {
         ".png", ".jpg", ".jpeg", ".webp",
@@ -243,7 +288,7 @@ async def ocr(file: UploadFile = File(...)):
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(
             status_code=413,
-            detail="Upload limit is 15 MB for this lightweight test."
+            detail="Upload limit is 15 MB."
         )
 
     try:
@@ -256,7 +301,7 @@ async def ocr(file: UploadFile = File(...)):
             except Exception as exc:
                 raise HTTPException(
                     status_code=400,
-                    detail="Could not read this PDF. Try a valid PDF or upload an image."
+                    detail="Could not read this PDF."
                 ) from exc
 
             for page_num in range(
@@ -265,7 +310,7 @@ async def ocr(file: UploadFile = File(...)):
             ):
                 images = convert_from_bytes(
                     data,
-                    dpi=110,
+                    dpi=130,
                     first_page=page_num,
                     last_page=page_num,
                     fmt="png",
@@ -304,7 +349,7 @@ async def ocr(file: UploadFile = File(...)):
             for p in page_texts
         ).strip()
 
-        requirements = extract_requirements(combined_text)
+        extracted = extract_requirements(combined_text)
 
         return JSONResponse({
             "ok": True,
@@ -315,11 +360,10 @@ async def ocr(file: UploadFile = File(...)):
                 "No readable text detected. Try a sharper, straight image."
             ),
             "artifacts": page_texts,
-            "extracted_requirements": requirements,
+            "extracted_requirements": extracted,
             "warning": (
-                "Experimental OCR and candidate extraction only. "
-                "Verify all dimensions, formats, and size limits against "
-                "the original official notification before use."
+                "Experimental OCR extraction only. Verify every requirement "
+                "against the official notification."
             )
         })
 
