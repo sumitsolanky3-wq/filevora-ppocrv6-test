@@ -1,5 +1,4 @@
 
-
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -11,10 +10,7 @@ import io
 import re
 import traceback
 
-app = FastAPI(
-    title="Filevora lightweight OCR + requirements extraction",
-    version="0.5.0"
-)
+app = FastAPI(title="Filevora OCR Requirement Test", version="0.6.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -29,30 +25,18 @@ MAX_PDF_PAGES = 3
 MAX_IMAGE_SIDE = 2600
 
 LABEL_PATTERNS = [
-    ("photograph", re.compile(
-        r"\b(?:photograph|passport\s*photo|photo\s*graph)\b", re.I)),
-    ("signature", re.compile(r"\b(?:signature)\b", re.I)),
-    ("marksheets", re.compile(
-        r"\b(?:(?:10th|12th)\s*(?:&|and)?\s*)?marksheets?|"
-        r"mark\s*sheets?|degrees?\s*(?:and|&)\s*mark\s*sheets?|"
-        r"graduation|post\s*graduation\b", re.I)),
-    ("identity_document", re.compile(
-        r"\b(?:aadhaar|aadhar|photo\s*id|identity\s*card)\b", re.I)),
-    ("application_form", re.compile(
-        r"\b(?:signed\s*application\s*form|application\s*form)\b", re.I)),
-    ("category_certificate", re.compile(
-        r"\b(?:category\s*certificate|sc\s*/?\s*st|obc|bc-?\s*[ab]|"
-        r"ews|non-?creamy(?:\s*layer)?|domicile|haryana\s*resident|"
-        r"residence\s*certificate|dsc\s*/\s*osc)\b", re.I)),
-    ("noc_experience", re.compile(
-        r"\b(?:noc|experience\s*proof|experience\s*certificate)\b", re.I)),
+    ("photograph", re.compile(r"\b(?:photograph|passport\s*photo|photo\s*graph)\b", re.I)),
+    ("signature", re.compile(r"\bsignature\b", re.I)),
+    ("marksheets", re.compile(r"\b(?:10th|12th|matriculation|marksheets?|mark\s*sheets?|degree\s*(?:and|&)\s*marksheets?|graduation|post\s*graduation)\b", re.I)),
+    ("identity_document", re.compile(r"\b(?:aadhaar|aadhar|photo\s*id|identity\s*card)\b", re.I)),
+    ("application_form", re.compile(r"\b(?:signed\s*application\s*form|application\s*form)\b", re.I)),
+    ("category_certificate", re.compile(r"\b(?:category\s*certificate|sc\s*/?\s*st|obc|bc-?\s*[ab]|ews|non-?creamy(?:\s*layer)?|domicile|haryana\s*resident|residence\s*certificate|dsc\s*/\s*osc)\b", re.I)),
+    ("noc_experience", re.compile(r"\b(?:noc|experience\s*(?:proof|certificate))\b", re.I)),
 ]
 
 GENERIC_CERT_RE = re.compile(r"\bcertificates?\b", re.I)
-DIMENSION_RE = re.compile(
-    r"(?<!\d)(\d{2,4})\s*(?:x|×)\s*(\d{2,4})\s*(?:px|pixels?)\b", re.I)
-SIZE_RE = re.compile(
-    r"\b(?:up\s*to|max(?:imum)?\s*)?(\d+(?:\.\d+)?)\s*(KB|MB)\b", re.I)
+DIMENSION_RE = re.compile(r"(?<!\d)(\d{2,4})\s*(?:x|×)\s*(\d{2,4})\s*(?:px|pixels?)\b", re.I)
+SIZE_RE = re.compile(r"\b(?:up\s*to|max(?:imum)?\s*)?(\d+(?:\.\d+)?)\s*(KB|MB)\b", re.I)
 FORMAT_RE = re.compile(r"\b(JPEG|JPG|PNG|PDF)\b", re.I)
 
 
@@ -64,72 +48,88 @@ def normalize_text(text: str) -> str:
 
 
 def find_labels(text: str):
-    matches = []
+    found = []
 
     for kind, pattern in LABEL_PATTERNS:
         for match in pattern.finditer(text):
-            matches.append((
-                kind, match.start(), match.end(), match.group(0)
-            ))
+            found.append({
+                "kind": kind,
+                "start": match.start(),
+                "end": match.end(),
+                "label": match.group(0)
+            })
 
-    # Generic certificate matches are added only if not already covered
-    # by a specific document label.
     for match in GENERIC_CERT_RE.finditer(text):
         covered = any(
-            start <= match.start() < end
-            for _, start, end, _ in matches
+            item["start"] <= match.start() < item["end"]
+            for item in found
         )
         if not covered:
-            matches.append((
-                "certificate", match.start(),
-                match.end(), match.group(0)
-            ))
+            found.append({
+                "kind": "certificate",
+                "start": match.start(),
+                "end": match.end(),
+                "label": match.group(0)
+            })
 
-    matches.sort(key=lambda item: item[1])
+    found.sort(key=lambda item: item["start"])
 
     deduped = []
-    for item in matches:
-        kind, start, end, label = item
-
-        if deduped and kind == deduped[-1][0]:
-            if start - deduped[-1][2] < 35:
+    for item in found:
+        if deduped and item["kind"] == deduped[-1]["kind"]:
+            between = text[deduped[-1]["end"]:item["start"]]
+            if len(between) < 45:
                 continue
-
         deduped.append(item)
 
     return deduped
+
+
+def unique_keep_order(items, key):
+    seen = set()
+    result = []
+
+    for item in items:
+        item_key = key(item)
+        if item_key not in seen:
+            seen.add(item_key)
+            result.append(item)
+
+    return result
 
 
 def extract_requirements(text: str):
     text = normalize_text(text)
     labels = find_labels(text)
     candidates = []
-    seen = set()
 
-    for i, (kind, start, label_end, label) in enumerate(labels):
-        # Stop at the next document heading or after a short window.
+    for i, item in enumerate(labels):
+        start = item["start"]
         next_start = (
-            labels[i + 1][1]
+            labels[i + 1]["start"]
             if i + 1 < len(labels)
             else len(text)
         )
-        end = min(next_start, start + 300)
-        snippet = text[start:end].strip()
+
+        snippet = text[start:min(next_start, start + 260)].strip()
 
         dimensions = [
             {
-                "width_px": int(m.group(1)),
-                "height_px": int(m.group(2))
+                "width_px": int(match.group(1)),
+                "height_px": int(match.group(2))
             }
-            for m in DIMENSION_RE.finditer(snippet)
+            for match in DIMENSION_RE.finditer(snippet)
         ]
+        dimensions = unique_keep_order(
+            dimensions,
+            lambda d: (d["width_px"], d["height_px"])
+        )
 
         sizes = []
-        for m in SIZE_RE.finditer(snippet):
-            value = float(m.group(1))
-            unit = m.group(2).upper()
-
-            kb = (
+        for match in SIZE_RE.finditer(snippet):
+            value = float(match.group(1))
+            unit = match.group(2).upper()
+            approx_kb = (
                 int(round(value * 1024))
                 if unit == "MB"
                 else int(round(value))
@@ -138,48 +138,58 @@ def extract_requirements(text: str):
             sizes.append({
                 "value": value,
                 "unit": unit,
-                "max_size_kb_approx": kb
+                "max_size_kb_approx": approx_kb
             })
 
-        formats = list(dict.fromkeys(
-            m.group(1).upper()
-            for m in FORMAT_RE.finditer(snippet)
-        ))
+        sizes = unique_keep_order(
+            sizes,
+            lambda s: (s["value"], s["unit"])
+        )
 
-        # Remove duplicate values while keeping their original order.
-        unique_dimensions = []
-        dimension_keys = set()
-        for item in dimensions:
-            key = (item["width_px"], item["height_px"])
-            if key not in dimension_keys:
-                dimension_keys.add(key)
-                unique_dimensions.append(item)
-
-        unique_sizes = []
-        size_keys = set()
-        for item in sizes:
-            key = (item["value"], item["unit"])
-            if key not in size_keys:
-                size_keys.add(key)
-                unique_sizes.append(item)
+        formats = unique_keep_order(
+            [
+                match.group(1).upper()
+                for match in FORMAT_RE.finditer(snippet)
+            ],
+            lambda value: value
+        )
 
         candidate = {
-            "document_type": kind,
-            "label_found": label,
-            "dimensions": unique_dimensions[:2],
+            "id": f"{item['kind']}-{i + 1}",
+            "document_type": item["kind"],
+            "label_found": item["label"],
+            "dimensions": dimensions[:2],
             "allowed_formats_found": formats[:3],
-            "file_size_limits_found": unique_sizes[:3],
-            "source_snippet": snippet[:350],
+            "file_size_limits_found": sizes[:3],
+            "source_snippet": snippet[:320],
             "status": "needs_review",
             "verified": False,
             "review_note": (
-                "OCR-derived candidate. Verify against the original "
-                "official notification before using."
+                "Check this candidate against the official "
+                "notification before using."
             )
         }
 
-        fingerprint = (
-            kind,
+        if item["kind"] in ("photograph", "signature") and not dimensions:
+            candidate["review_note"] = (
+                "No pixel dimensions found near this heading. "
+                "Check the original table."
+            )
+
+        if len(sizes) > 1:
+            candidate["review_note"] += (
+                " Multiple size limits nearby; verify which applies."
+            )
+
+        candidates.append(candidate)
+
+    # Remove duplicate candidates with the same type and values.
+    merged = []
+    seen = set()
+
+    for candidate in candidates:
+        key = (
+            candidate["document_type"],
             tuple(
                 (d["width_px"], d["height_px"])
                 for d in candidate["dimensions"]
@@ -191,43 +201,29 @@ def extract_requirements(text: str):
             )
         )
 
-        if fingerprint not in seen:
-            seen.add(fingerprint)
-            candidates.append(candidate)
+        if key in seen:
+            continue
+
+        seen.add(key)
+        merged.append(candidate)
 
     browser_noise = bool(re.search(
         r"\b(?:google\.com/search|shopping|videos news forums|"
         r"AI overview|KB/S|sign in|settings)\b",
-        text, re.I
+        text,
+        re.I
     ))
 
-    for item in candidates:
-        if (
-            not item["dimensions"]
-            and item["document_type"] in ("photograph", "signature")
-        ):
-            item["review_note"] = (
-                "No pixel dimensions found near this label; "
-                "check the original table."
-            )
-
-        if len(item["file_size_limits_found"]) > 1:
-            item["review_note"] += (
-                " Multiple size values found nearby; verify which "
-                "limit belongs to this document."
-            )
-
     return {
-        "schema_version": "0.3",
+        "schema_version": "0.4",
         "status": "candidates_only",
         "browser_or_page_noise_detected": browser_noise,
-        "candidate_count": len(candidates),
+        "candidate_count": len(merged),
         "note": (
-            "OCR extraction only, not official verification. For best "
-            "results upload a clear crop of the actual requirements table. "
-            "Check every candidate against the official notification."
+            "OCR-derived candidates only. Verify all values "
+            "against the official notification."
         ),
-        "requirements": candidates
+        "requirements": merged
     }
 
 
@@ -241,9 +237,8 @@ def prepare_image(image: Image.Image) -> Image.Image:
 
 
 def ocr_image(image: Image.Image) -> str:
-    image = prepare_image(image)
     return pytesseract.image_to_string(
-        image,
+        prepare_image(image),
         lang="eng",
         config="--oem 1 --psm 6"
     ).strip()
@@ -257,7 +252,7 @@ def health():
         "requested_mode": "tesseract-lightweight",
         "model_loaded": True,
         "load_error": None,
-        "version": "0.5.0"
+        "version": "0.6.0"
     }
 
 
@@ -280,39 +275,32 @@ async def ocr(file: UploadFile = File(...)):
     data = await file.read()
 
     if not data:
-        raise HTTPException(
-            status_code=400,
-            detail="File is empty."
-        )
+        raise HTTPException(status_code=400, detail="File is empty.")
 
     if len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail="Upload limit is 15 MB."
-        )
+        raise HTTPException(status_code=413, detail="Upload limit is 15 MB.")
 
     try:
-        page_texts = []
+        pages = []
 
         if suffix == ".pdf":
             try:
                 info = pdfinfo_from_bytes(data)
-                total_pages = int(info.get("Pages", 1))
+                page_count = int(info.get("Pages", 1))
             except Exception as exc:
                 raise HTTPException(
                     status_code=400,
                     detail="Could not read this PDF."
                 ) from exc
 
-            for page_num in range(
-                1,
-                min(max(total_pages, 1), MAX_PDF_PAGES) + 1
+            for page_number in range(
+                1, min(max(page_count, 1), MAX_PDF_PAGES) + 1
             ):
                 images = convert_from_bytes(
                     data,
                     dpi=130,
-                    first_page=page_num,
-                    last_page=page_num,
+                    first_page=page_number,
+                    last_page=page_number,
                     fmt="png",
                     thread_count=1,
                     grayscale=True
@@ -320,8 +308,8 @@ async def ocr(file: UploadFile = File(...)):
 
                 if images:
                     try:
-                        page_texts.append({
-                            "page": page_num,
+                        pages.append({
+                            "page": page_number,
                             "text": ocr_image(images[0])
                         })
                     finally:
@@ -331,45 +319,41 @@ async def ocr(file: UploadFile = File(...)):
             try:
                 image = Image.open(io.BytesIO(data))
                 try:
-                    page_texts.append({
+                    pages.append({
                         "page": 1,
                         "text": ocr_image(image)
                     })
                 finally:
                     image.close()
-
             except Exception as exc:
                 raise HTTPException(
                     status_code=400,
-                    detail="Could not read this image. Upload a valid image."
+                    detail="Could not read this image."
                 ) from exc
 
-        combined_text = "\n\n".join(
-            f"--- Page {p['page']} ---\n{p['text']}"
-            for p in page_texts
+        full_text = "\n\n".join(
+            f"--- Page {page['page']} ---\n{page['text']}"
+            for page in pages
         ).strip()
-
-        extracted = extract_requirements(combined_text)
 
         return JSONResponse({
             "ok": True,
             "requested_mode": "tesseract-lightweight",
             "engine": "Tesseract OCR (lightweight)",
             "ocr_model": "Tesseract English",
-            "text": combined_text or (
-                "No readable text detected. Try a sharper, straight image."
+            "text": full_text or (
+                "No readable text detected. Try a clearer, straight image."
             ),
-            "artifacts": page_texts,
-            "extracted_requirements": extracted,
+            "artifacts": pages,
+            "extracted_requirements": extract_requirements(full_text),
             "warning": (
-                "Experimental OCR extraction only. Verify every requirement "
+                "Experimental OCR extraction. Verify all values "
                 "against the official notification."
             )
         })
 
     except HTTPException:
         raise
-
     except Exception as exc:
         traceback.print_exc()
         raise HTTPException(
