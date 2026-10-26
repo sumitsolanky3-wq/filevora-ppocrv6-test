@@ -1,4 +1,3 @@
-
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -60,6 +59,7 @@ def normalize_text(text: str) -> str:
 
 
 def find_labels(text: str):
+    """Find specific document labels and suppress ambiguous generic certificate labels."""
     found = []
 
     for kind, pattern in LABEL_PATTERNS:
@@ -71,42 +71,17 @@ def find_labels(text: str):
                 "label": match.group(0)
             })
 
-    for match in GENERIC_CERT_RE.finditer(text):
-        covered = any(
-            item["start"] <= match.start() < item["end"]
-            for item in found
-        )
-
-        nearby = text[
-            max(0, match.start() - 90):
-            min(len(text), match.end() + 90)
-        ]
-
-        specific_nearby = any(re.search(pattern, nearby, re.I) for pattern in [
-            r"category\s*certificate",
-            r"signed\s*application",
-            r"marksheets?",
-            r"degree",
-            r"domicile",
-            r"ews",
-            r"non-?creamy"
-        ])
-
-        if not covered and not specific_nearby:
-            found.append({
-                "kind": "certificate",
-                "start": match.start(),
-                "end": match.end(),
-                "label": match.group(0)
-            })
-
-    found.sort(key=lambda item: item["start"])
+    # Do not create generic "certificate" cards from every occurrence of
+    # the word certificate. They are ambiguous and often duplicate a
+    # specific document type such as category_certificate or noc_experience.
+    found.sort(key=lambda item: (item["start"], -(item["end"] - item["start"])))
 
     result = []
     for item in found:
         if result and item["kind"] == result[-1]["kind"]:
             between = text[result[-1]["end"]:item["start"]]
-            if len(between) < 45:
+            # OCR often repeats the same heading nearby. Ignore close repeats.
+            if len(between) < 90:
                 continue
         result.append(item)
 
