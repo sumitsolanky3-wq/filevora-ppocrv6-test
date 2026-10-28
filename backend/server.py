@@ -395,3 +395,101 @@ async def ocr(file: UploadFile = File(...)):
             status_code=500,
             detail=f"Lightweight OCR failed: {str(exc)[:500]}"
         )
+
+# Filevora Form Ready - first image processing endpoint
+from fastapi.responses import Response as BinaryResponse
+
+
+@app.post("/process-image")
+async def process_image(
+    file: UploadFile = File(...),
+    width: int = 100,
+    height: int = 120,
+    max_kb: int = 200
+):
+    filename = Path(file.filename or "upload.jpg").name
+    suffix = Path(filename).suffix.lower()
+
+    if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Upload a JPG, PNG, WEBP or BMP image."
+        )
+
+    if not (1 <= width <= 3000 and 1 <= height <= 3000):
+        raise HTTPException(
+            status_code=400,
+            detail="Width and height must be between 1 and 3000 pixels."
+        )
+
+    if not (1 <= max_kb <= 10240):
+        raise HTTPException(
+            status_code=400,
+            detail="Maximum file size must be between 1 and 10240 KB."
+        )
+
+    data = await file.read()
+
+    if not data:
+        raise HTTPException(status_code=400, detail="File is empty.")
+
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Upload limit is 15 MB.")
+
+    try:
+        with Image.open(io.BytesIO(data)) as source:
+            image = ImageOps.exif_transpose(source).convert("RGB")
+            image = image.resize(
+                (width, height),
+                Image.Resampling.LANCZOS
+            )
+
+            output = None
+            limit_bytes = max_kb * 1024
+
+            for quality in range(90, 9, -5):
+                buffer = io.BytesIO()
+                image.save(
+                    buffer,
+                    format="JPEG",
+                    quality=quality,
+                    optimize=True
+                )
+                candidate = buffer.getvalue()
+                buffer.close()
+
+                if len(candidate) <= limit_bytes:
+                    output = candidate
+                    break
+
+            image.close()
+
+            if output is None:
+                raise HTTPException(
+                    status_code=413,
+                    detail=(
+                        "This image cannot meet the requested size "
+                        "at these exact dimensions. Use a higher KB limit."
+                    )
+                )
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Could not process this image."
+        ) from exc
+
+    ready_name = f"{Path(filename).stem}_ready.jpg"
+
+    return BinaryResponse(
+        content=output,
+        media_type="image/jpeg",
+        headers={
+            "Content-Disposition": f'attachment; filename="{ready_name}"',
+            "X-Image-Width": str(width),
+            "X-Image-Height": str(height),
+            "X-File-Size-Bytes": str(len(output))
+        }
+    )
